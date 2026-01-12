@@ -1,0 +1,86 @@
+// =============================================
+// ❤️ HEALTH CONTROLLER
+// =============================================
+// System health checks for monitoring
+// =============================================
+
+import { Controller, Get } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { PrismaService } from '@infrastructure/database/prisma.service';
+import { CacheService } from '@infrastructure/cache/cache.service';
+import { Public } from '@common/decorators';
+
+interface HealthStatus {
+  status: 'healthy' | 'unhealthy';
+  timestamp: string;
+  uptime: number;
+  services: {
+    api: 'ok' | 'error';
+    database: 'ok' | 'error';
+    cache: 'ok' | 'error';
+  };
+  latency?: {
+    database: number;
+    cache: number;
+  };
+}
+
+@ApiTags('Health')
+@Controller('health')
+export class HealthController {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cache: CacheService,
+  ) {}
+
+  @Get()
+  @Public()
+  @ApiOperation({ summary: 'Full health check' })
+  @ApiResponse({ status: 200, description: 'System is healthy' })
+  @ApiResponse({ status: 503, description: 'System is unhealthy' })
+  async check(): Promise<HealthStatus> {
+    const [dbHealth, cacheHealth] = await Promise.all([
+      this.prisma.healthCheck(),
+      this.cache.healthCheck(),
+    ]);
+
+    const isHealthy = dbHealth.status === 'healthy' && cacheHealth.status === 'healthy';
+
+    return {
+      status: isHealthy ? 'healthy' : 'unhealthy',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      services: {
+        api: 'ok',
+        database: dbHealth.status === 'healthy' ? 'ok' : 'error',
+        cache: cacheHealth.status === 'healthy' ? 'ok' : 'error',
+      },
+      latency: {
+        database: dbHealth.latencyMs,
+        cache: cacheHealth.latencyMs,
+      },
+    };
+  }
+
+  @Get('live')
+  @Public()
+  @ApiOperation({ summary: 'Liveness probe (for Kubernetes)' })
+  @ApiResponse({ status: 200, description: 'Service is alive' })
+  live(): { status: string } {
+    return { status: 'ok' };
+  }
+
+  @Get('ready')
+  @Public()
+  @ApiOperation({ summary: 'Readiness probe (for Kubernetes)' })
+  @ApiResponse({ status: 200, description: 'Service is ready' })
+  @ApiResponse({ status: 503, description: 'Service is not ready' })
+  async ready(): Promise<{ status: string; ready: boolean }> {
+    try {
+      await this.prisma.$queryRaw`SELECT 1`;
+      return { status: 'ok', ready: true };
+    } catch {
+      return { status: 'error', ready: false };
+    }
+  }
+}

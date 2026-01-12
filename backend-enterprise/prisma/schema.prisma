@@ -1,0 +1,674 @@
+// =============================================
+// 📦 PRISMA SCHEMA - SaaS AI Sales Assistant
+// =============================================
+// Enterprise-grade database schema
+// Following best practices from:
+// - Designing Data-Intensive Applications (Kleppmann)
+// - Clean Architecture (Robert Martin)
+// =============================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================
+// 🏢 MULTI-TENANT: COMPANY (Tenant Root)
+// =============================================
+
+model Company {
+  id               String    @id @default(uuid())
+  name             String
+  slug             String    @unique
+  plan             Plan      @default(STARTER)
+  
+  // Stripe Integration
+  stripeCustomerId String?   @unique @map("stripe_customer_id")
+  billingEmail     String?   @map("billing_email")
+  
+  // Company Details
+  logoUrl          String?   @map("logo_url")
+  website          String?
+  industry         String?
+  size             CompanySize?
+  timezone         String    @default("America/Sao_Paulo")
+  
+  // Feature Limits (based on plan)
+  maxUsers         Int       @default(5) @map("max_users")
+  maxCallsPerMonth Int       @default(100) @map("max_calls_per_month")
+  maxChatsPerMonth Int       @default(50) @map("max_chats_per_month")
+  
+  // Settings (JSON for flexibility)
+  settings         Json      @default("{}")
+  
+  // Status
+  isActive         Boolean   @default(true) @map("is_active")
+  deletedAt        DateTime? @map("deleted_at")
+  
+  // Timestamps
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  users            User[]
+  calls            Call[]
+  whatsappChats    WhatsappChat[]
+  subscriptions    Subscription[]
+  invoices         Invoice[]
+  apiKeys          ApiKey[]
+  auditLogs        AuditLog[]
+  notifications    Notification[]
+
+  @@index([slug])
+  @@index([stripeCustomerId])
+  @@index([isActive])
+  @@map("companies")
+}
+
+// =============================================
+// 👤 USER
+// =============================================
+
+model User {
+  id                      String     @id @default(uuid())
+  
+  // Authentication (Clerk)
+  clerkId                 String     @unique @map("clerk_id")
+  email                   String
+  
+  // Profile
+  name                    String
+  avatarUrl               String?    @map("avatar_url")
+  phone                   String?
+  
+  // Role & Permissions
+  role                    UserRole   @default(VENDOR)
+  permissions             String[]   @default([])
+  
+  // Status
+  status                  UserStatus @default(ACTIVE)
+  isActive                Boolean    @default(true) @map("is_active")
+  lastActiveAt            DateTime?  @map("last_active_at")
+  
+  // Preferences
+  notificationPreferences Json?      @map("notification_preferences")
+  uiPreferences           Json?      @map("ui_preferences")
+  
+  // Soft Delete
+  deletedAt               DateTime?  @map("deleted_at")
+  
+  // Tenant Relationship
+  companyId               String     @map("company_id")
+  company                 Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Timestamps
+  createdAt               DateTime   @default(now()) @map("created_at")
+  updatedAt               DateTime   @updatedAt @map("updated_at")
+
+  // Relations
+  calls                   Call[]
+  whatsappChats           WhatsappChat[]
+  aiSuggestions           AISuggestion[]
+  auditLogs               AuditLog[]
+  notifications           Notification[]
+
+  @@unique([companyId, email])
+  @@index([clerkId])
+  @@index([companyId])
+  @@index([companyId, status])
+  @@index([companyId, role])
+  @@map("users")
+}
+
+// =============================================
+// 📞 CALLS MODULE
+// =============================================
+
+model Call {
+  id                  String        @id @default(uuid())
+  
+  // Tenant & User
+  companyId           String        @map("company_id")
+  company             Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId              String        @map("user_id")
+  user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Call Details
+  phoneNumber         String        @map("phone_number")
+  contactName         String?       @map("contact_name")
+  direction           CallDirection
+  status              CallStatus    @default(INITIATED)
+  duration            Int           @default(0)
+  
+  // Twilio Integration
+  twilioCallSid       String?       @unique @map("twilio_call_sid")
+  twilioRecordingSid  String?       @map("twilio_recording_sid")
+  recordingUrl        String?       @map("recording_url")
+  
+  // Transcription
+  transcript          String?       @db.Text
+  transcriptSegments  Json?         @map("transcript_segments")
+  
+  // AI Analysis
+  summary             String?       @db.Text
+  sentiment           Float?
+  sentimentLabel      SentimentLabel?  @map("sentiment_label")
+  keywords            String[]      @default([])
+  actionItems         Json?         @map("action_items")
+  
+  // Organization
+  tags                String[]      @default([])
+  notes               String?       @db.Text
+  metadata            Json?
+  
+  // Timestamps
+  startedAt           DateTime?     @map("started_at")
+  endedAt             DateTime?     @map("ended_at")
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  aiSuggestions       AISuggestion[]
+
+  @@index([companyId])
+  @@index([userId])
+  @@index([companyId, status])
+  @@index([companyId, createdAt(sort: Desc)])
+  @@index([phoneNumber])
+  @@index([twilioCallSid])
+  @@map("calls")
+}
+
+// =============================================
+// 💬 WHATSAPP MODULE
+// =============================================
+
+model WhatsappChat {
+  id                  String        @id @default(uuid())
+  
+  // Tenant
+  companyId           String        @map("company_id")
+  company             Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Assigned Agent (optional)
+  userId              String?       @map("user_id")
+  user                User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Customer Info
+  customerPhone       String        @map("customer_phone")
+  customerName        String?       @map("customer_name")
+  customerAvatar      String?       @map("customer_avatar")
+  
+  // Chat Status
+  status              ChatStatus    @default(OPEN)
+  priority            ChatPriority  @default(NORMAL)
+  unreadCount         Int           @default(0) @map("unread_count")
+  
+  // Last Message Preview
+  lastMessageAt       DateTime?     @map("last_message_at")
+  lastMessagePreview  String?       @map("last_message_preview")
+  
+  // Organization
+  tags                String[]      @default([])
+  metadata            Json?
+  
+  // Timestamps
+  archivedAt          DateTime?     @map("archived_at")
+  deletedAt           DateTime?     @map("deleted_at")
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  messages            WhatsappMessage[]
+  aiSuggestions       AISuggestion[]
+
+  @@unique([companyId, customerPhone])
+  @@index([companyId])
+  @@index([userId])
+  @@index([companyId, status])
+  @@index([companyId, lastMessageAt(sort: Desc)])
+  @@map("whatsapp_chats")
+}
+
+model WhatsappMessage {
+  id              String            @id @default(uuid())
+  
+  // Chat Relationship
+  chatId          String            @map("chat_id")
+  chat            WhatsappChat      @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  // Message Details
+  waMessageId     String?           @unique @map("wa_message_id")
+  type            MessageType       @default(TEXT)
+  direction       MessageDirection
+  status          MessageStatus     @default(PENDING)
+  
+  // Content
+  content         String            @db.Text
+  mediaUrl        String?           @map("media_url")
+  mediaType       String?           @map("media_type")
+  mediaMimeType   String?           @map("media_mime_type")
+  
+  // AI Tracking
+  aiSuggestionUsed Boolean          @default(false) @map("ai_suggestion_used")
+  
+  // Metadata
+  metadata        Json?
+  
+  // Timestamps
+  sentAt          DateTime?         @map("sent_at")
+  deliveredAt     DateTime?         @map("delivered_at")
+  readAt          DateTime?         @map("read_at")
+  createdAt       DateTime          @default(now()) @map("created_at")
+
+  @@index([chatId])
+  @@index([chatId, createdAt(sort: Desc)])
+  @@index([waMessageId])
+  @@map("whatsapp_messages")
+}
+
+// =============================================
+// 🤖 AI SUGGESTIONS
+// =============================================
+
+model AISuggestion {
+  id              String          @id @default(uuid())
+  
+  // Context - One of these will be set
+  callId          String?         @map("call_id")
+  call            Call?           @relation(fields: [callId], references: [id], onDelete: Cascade)
+  chatId          String?         @map("chat_id")
+  chat            WhatsappChat?   @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  
+  // Created by
+  userId          String?         @map("user_id")
+  user            User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  // Suggestion Content
+  type            SuggestionType
+  content         String          @db.Text
+  confidence      Float           @default(0.8)
+  
+  // Context that generated the suggestion
+  triggerText     String?         @db.Text @map("trigger_text")
+  
+  // Usage Tracking
+  wasUsed         Boolean         @default(false) @map("was_used")
+  usedAt          DateTime?       @map("used_at")
+  
+  // Feedback
+  feedback        SuggestionFeedback? 
+  feedbackNote    String?         @map("feedback_note")
+  
+  // AI Metadata
+  model           String?
+  promptTokens    Int?            @map("prompt_tokens")
+  completionTokens Int?           @map("completion_tokens")
+  latencyMs       Int?            @map("latency_ms")
+  
+  // Timestamps
+  createdAt       DateTime        @default(now()) @map("created_at")
+
+  @@index([callId])
+  @@index([chatId])
+  @@index([userId])
+  @@index([createdAt(sort: Desc)])
+  @@map("ai_suggestions")
+}
+
+// =============================================
+// 💳 BILLING MODULE
+// =============================================
+
+model Subscription {
+  id                    String              @id @default(uuid())
+  
+  // Company
+  companyId             String              @map("company_id")
+  company               Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Stripe
+  stripeSubscriptionId  String              @unique @map("stripe_subscription_id")
+  stripePriceId         String              @map("stripe_price_id")
+  stripeCustomerId      String?             @map("stripe_customer_id")
+
+  // Subscription Details
+  plan                  Plan
+  status                SubscriptionStatus
+  
+  // Billing Period
+  currentPeriodStart    DateTime            @map("current_period_start")
+  currentPeriodEnd      DateTime            @map("current_period_end")
+  
+  // Trial
+  trialStart            DateTime?           @map("trial_start")
+  trialEnd              DateTime?           @map("trial_end")
+  
+  // Cancellation
+  cancelAtPeriodEnd     Boolean             @default(false) @map("cancel_at_period_end")
+  canceledAt            DateTime?           @map("canceled_at")
+  cancelReason          String?             @map("cancel_reason")
+
+  // Timestamps
+  createdAt             DateTime            @default(now()) @map("created_at")
+  updatedAt             DateTime            @updatedAt @map("updated_at")
+
+  @@index([companyId])
+  @@index([stripeSubscriptionId])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+model Invoice {
+  id                  String        @id @default(uuid())
+  
+  // Company
+  companyId           String        @map("company_id")
+  company             Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Stripe
+  stripeInvoiceId     String        @unique @map("stripe_invoice_id")
+  stripeCustomerId    String?       @map("stripe_customer_id")
+  
+  // Invoice Details
+  status              InvoiceStatus
+  currency            String        @default("brl")
+  amount              Int           @default(0)
+  amountPaid          Int           @default(0) @map("amount_paid")
+  
+  // URLs
+  hostedInvoiceUrl    String?       @map("hosted_invoice_url")
+  pdfUrl              String?       @map("pdf_url")
+  
+  // Dates
+  periodStart         DateTime?     @map("period_start")
+  periodEnd           DateTime?     @map("period_end")
+  dueDate             DateTime?     @map("due_date")
+  paidAt              DateTime?     @map("paid_at")
+
+  // Timestamps
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
+
+  @@index([companyId])
+  @@index([stripeInvoiceId])
+  @@index([status])
+  @@map("invoices")
+}
+
+// =============================================
+// 🔔 NOTIFICATIONS
+// =============================================
+
+model Notification {
+  id            String            @id @default(uuid())
+  
+  // Relationships
+  companyId     String            @map("company_id")
+  company       Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId        String            @map("user_id")
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Notification
+  type          NotificationType
+  title         String
+  message       String            @db.Text
+  data          Json?
+  
+  // Status
+  read          Boolean           @default(false)
+  readAt        DateTime?         @map("read_at")
+  
+  // Delivery
+  channel       NotificationChannel @default(IN_APP)
+  sentAt        DateTime?         @map("sent_at")
+
+  // Timestamps
+  createdAt     DateTime          @default(now()) @map("created_at")
+
+  @@index([userId, read])
+  @@index([companyId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("notifications")
+}
+
+// =============================================
+// 🔑 API KEYS
+// =============================================
+
+model ApiKey {
+  id            String    @id @default(uuid())
+  
+  // Company
+  companyId     String    @map("company_id")
+  company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Key
+  name          String
+  keyHash       String    @unique @map("key_hash")
+  keyPrefix     String    @map("key_prefix")
+  
+  // Permissions
+  scopes        String[]  @default([])
+  
+  // Status
+  isActive      Boolean   @default(true) @map("is_active")
+  expiresAt     DateTime? @map("expires_at")
+  lastUsedAt    DateTime? @map("last_used_at")
+  usageCount    Int       @default(0) @map("usage_count")
+
+  // Timestamps
+  createdAt     DateTime  @default(now()) @map("created_at")
+  revokedAt     DateTime? @map("revoked_at")
+
+  @@index([companyId])
+  @@index([keyHash])
+  @@map("api_keys")
+}
+
+// =============================================
+// 📝 AUDIT LOG
+// =============================================
+
+model AuditLog {
+  id            String    @id @default(uuid())
+  
+  // Context
+  companyId     String    @map("company_id")
+  company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId        String?   @map("user_id")
+  user          User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Action
+  action        AuditAction
+  resource      String
+  resourceId    String?   @map("resource_id")
+  
+  // Details
+  description   String?
+  oldValues     Json?     @map("old_values")
+  newValues     Json?     @map("new_values")
+  
+  // Request Context
+  ipAddress     String?   @map("ip_address")
+  userAgent     String?   @map("user_agent")
+  requestId     String?   @map("request_id")
+
+  // Timestamp
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  @@index([companyId])
+  @@index([userId])
+  @@index([companyId, createdAt(sort: Desc)])
+  @@index([action])
+  @@index([resource])
+  @@map("audit_logs")
+}
+
+// =============================================
+// 📋 ENUMS
+// =============================================
+
+enum Plan {
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum CompanySize {
+  SOLO
+  SMALL
+  MEDIUM
+  LARGE
+  ENTERPRISE
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MANAGER
+  VENDOR
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING
+}
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum CallStatus {
+  INITIATED
+  RINGING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  NO_ANSWER
+  BUSY
+  CANCELED
+}
+
+enum SentimentLabel {
+  VERY_POSITIVE
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+  VERY_NEGATIVE
+}
+
+enum ChatStatus {
+  OPEN
+  PENDING
+  ACTIVE
+  RESOLVED
+  ARCHIVED
+  BLOCKED
+}
+
+enum ChatPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  AUDIO
+  VIDEO
+  DOCUMENT
+  STICKER
+  LOCATION
+  CONTACT
+  TEMPLATE
+}
+
+enum MessageDirection {
+  INCOMING
+  OUTGOING
+}
+
+enum MessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum SuggestionType {
+  GREETING
+  OBJECTION_HANDLING
+  CLOSING
+  QUESTION
+  INFORMATION
+  FOLLOW_UP
+  EMPATHY
+  RAPPORT
+  GENERAL
+}
+
+enum SuggestionFeedback {
+  HELPFUL
+  NOT_HELPFUL
+  PARTIALLY_HELPFUL
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  UNPAID
+  TRIALING
+  INCOMPLETE
+  PAUSED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  VOID
+  UNCOLLECTIBLE
+}
+
+enum NotificationType {
+  SYSTEM
+  CALL_STARTED
+  CALL_ENDED
+  NEW_MESSAGE
+  AI_SUGGESTION
+  SUBSCRIPTION_UPDATE
+  BILLING_ALERT
+  TEAM_UPDATE
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  PUSH
+  SMS
+}
+
+enum AuditAction {
+  CREATE
+  READ
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  EXPORT
+  IMPORT
+  INVITE
+  REVOKE
+}

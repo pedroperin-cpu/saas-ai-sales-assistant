@@ -1,0 +1,135 @@
+// =============================================
+// 💬 WHATSAPP WEBHOOK CONTROLLER
+// =============================================
+
+import {
+  Controller,
+  Post,
+  Get,
+  Body,
+  Query,
+  HttpCode,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
+import { ApiTags, ApiExcludeEndpoint } from '@nestjs/swagger';
+import { ConfigService } from '@nestjs/config';
+import { Public } from '@common/decorators';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+
+@ApiTags('Webhooks')
+@Controller('webhooks/whatsapp')
+export class WhatsappWebhookController {
+  private readonly logger = new Logger(WhatsappWebhookController.name);
+
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly eventEmitter: EventEmitter2,
+  ) {}
+
+  @Get()
+  @Public()
+  @ApiExcludeEndpoint()
+  verifyWebhook(
+    @Query('hub.mode') mode: string,
+    @Query('hub.verify_token') token: string,
+    @Query('hub.challenge') challenge: string,
+  ) {
+    const verifyToken = this.configService.get<string>('whatsapp.verifyToken');
+
+    if (mode === 'subscribe' && token === verifyToken) {
+      this.logger.log('WhatsApp webhook verified');
+      return challenge;
+    }
+
+    this.logger.warn('WhatsApp webhook verification failed');
+    return 'Verification failed';
+  }
+
+  @Post()
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @ApiExcludeEndpoint()
+  async handleWebhook(@Body() body: any) {
+    this.logger.debug('WhatsApp webhook received:', JSON.stringify(body));
+
+    try {
+      // Process each entry
+      const entries = body?.entry || [];
+      
+      for (const entry of entries) {
+        const changes = entry?.changes || [];
+        
+        for (const change of changes) {
+          if (change.field === 'messages') {
+            await this.processMessages(change.value);
+          }
+        }
+      }
+
+      return { received: true };
+    } catch (error) {
+      this.logger.error('WhatsApp webhook processing failed:', error);
+      return { received: true }; // Always return 200 to WhatsApp
+    }
+  }
+
+  private async processMessages(value: any) {
+    const messages = value?.messages || [];
+    const contacts = value?.contacts || [];
+    const metadata = value?.metadata;
+
+    for (const message of messages) {
+      const contact = contacts.find((c: any) => c.wa_id === message.from);
+
+      const messageData = {
+        waMessageId: message.id,
+        from: message.from,
+        timestamp: new Date(parseInt(message.timestamp) * 1000),
+        type: message.type,
+        content: this.extractContent(message),
+        contactName: contact?.profile?.name,
+        phoneNumberId: metadata?.phone_number_id,
+      };
+
+      this.logger.log(`New WhatsApp message from ${message.from}: ${message.type}`);
+
+      // Emit event for processing
+      this.eventEmitter.emit('whatsapp.message.received', messageData);
+    }
+
+    // Process status updates
+    const statuses = value?.statuses || [];
+    for (const status of statuses) {
+      this.eventEmitter.emit('whatsapp.message.status', {
+        waMessageId: status.id,
+        status: status.status,
+        timestamp: new Date(parseInt(status.timestamp) * 1000),
+        recipientId: status.recipient_id,
+      });
+    }
+  }
+
+  private extractContent(message: any): string {
+    switch (message.type) {
+      case 'text':
+        return message.text?.body || '';
+      case 'image':
+        return `[Image: ${message.image?.caption || 'No caption'}]`;
+      case 'audio':
+        return '[Audio message]';
+      case 'video':
+        return `[Video: ${message.video?.caption || 'No caption'}]`;
+      case 'document':
+        return `[Document: ${message.document?.filename || 'Unknown'}]`;
+      case 'location':
+        return `[Location: ${message.location?.latitude}, ${message.location?.longitude}]`;
+      case 'contacts':
+        return `[Contact shared]`;
+      case 'sticker':
+        return '[Sticker]';
+      default:
+        return `[${message.type}]`;
+    }
+  }
+}
